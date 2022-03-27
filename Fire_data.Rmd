@@ -1,92 +1,112 @@
 ---
 title: "Fire Data"
-output: html_notebook
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  pdf_document: default
 ---
 
-
+## Load Packages 
 ```{r}
 library("RSQLite")
-library(dbplyr)
-
-```
-
-
-
-con <- dbConnect(drv=RSQLite::SQLite(), dbname="FPA_FOD_20170508.sqlite")
-## list all tables
-tables <- dbListTables(con)
-
-## exclude sqlite_sequence (contains table information)
-tables <- tables[tables != "sqlite_sequence"]
-print(src_dbi(tables))
-## create a data.frame for each table
-lDataFrames<- Map(tables, ~{
-  dbGetQuery(conn=con, statement=paste("SELECT * FROM fires"))})
-
-
-```{r}
-#bruh wtf fix later
-fires <- DBI::dbConnect(RSQLite::SQLite(), "FPA_FOD_20170508.sqlite")
-src_dbi(fires)
-
-```
-
-
-```{r}
-library("ggmap")
+library("tidyr")
+library("rspatial")
+library("dbplyr")
+library("dplyr")
 library("rworldmap")
-library("rgdal")
 library("readxl")
 library("purrr")
-library(ggplot2)
+library("ggplot2")
+library("maps")
+library("mapdata")
 library("usmap")
-library(maps)
-library(mapdata)
-library(usmap)
-#all 
-fire_info<-tbl(fires, sql("SELECT OBJECTID, SOURCE_SYSTEM, SOURCE_REPORTING_UNIT_NAME, FIRE_NAME, FIRE_YEAR,DISCOVERY_DATE, STAT_CAUSE_DESCR, CONT_DATE,FIRE_SIZE, FIRE_SIZE_CLASS,LATITUDE, LONGITUDE,STATE,COUNTY, FIPS_CODE, FIPS_NAME, COUNTY, FIPS_NAME FROM fires"))
-
-#pared down
-
-head(fire_info, n = 10)
+require("devtools")
+library("ggpubr")
+library("rnaturalearth")
+library("rnaturalearthdata")
+#library("rgdal")
 
 ```
+## Acess US Fire data with SQL
+data source: 
 ```{r}
+#maps we will use in our analysis
+#hawaii map
+hawaii <- subset(getData("GADM", country = "usa", level = 1), NAME_1 == "Hawaii")
+#hawaii <- subset(usa, NAME_1 == "Hawaii")
+
+#will be re positioned alaska map
+us_ak<- subset(ne_countries(scale='medium',returnclass = 'sf'), admin == "United States of America")
+
+```
+
+
+```{r}
+fires <- DBI::dbConnect(RSQLite::SQLite(), "FPA_FOD_20170508.sqlite")
+src_dbi(fires)
+```
+
+
+```{r}
+dbListFields(fires, "fires")
+#DISCOVERY_DATE -CONT_DATE see average fire length 
+#Fire_size is in acres
+#FIPS_CODE do county density ?
+
+```
+
+## Pare down fire data to what will be used in our analysis
+```{r}
+fire_info<-tbl(fires, sql("SELECT OBJECTID, SOURCE_SYSTEM, SOURCE_REPORTING_UNIT_NAME, FIRE_NAME, FIRE_YEAR,DISCOVERY_DATE, STAT_CAUSE_DESCR, CONT_DATE,FIRE_SIZE, FIRE_SIZE_CLASS,LATITUDE, LONGITUDE,STATE,COUNTY, FIPS_CODE, FIPS_NAME, COUNTY, FIPS_NAME FROM fires"))
+#head(fire_info, n = 10)
 causes<-data.frame(fire_info %>%
     select(STAT_CAUSE_DESCR,LATITUDE,LONGITUDE,STATE,FIRE_SIZE,FIRE_SIZE_CLASS))
-causes
-```
+head(causes)
 
-```{r}
-# Basic barplot
-ggplot(causes, aes(x= reorder(STAT_CAUSE_DESCR,STAT_CAUSE_DESCR,function(x)+length(x)))) +
-  geom_bar(fill="brown4", color="darkred")+coord_flip()+ggtitle("Causes of man-made fires (by count)")
+fire_info=NA
 ```
-
+Lets examine the most common causes for fires
 ```{r}
-kernel_density_map<-function(df,x,y,title){
+# Show the causes of fire with counts in descending order
+ggplot(dbGetQuery(fires, "
+           SELECT 
+           STAT_CAUSE_DESCR, 
+           count(*) as [count] 
+           FROM Fires 
+           GROUP BY STAT_CAUSE_DESCR 
+           ORDER BY count DESC;"),aes(y=count,x=reorder(STAT_CAUSE_DESCR,count)))+geom_bar(stat="identity",fill="brown4", color="darkred")+coord_flip()+xlab("Cause of fire")+ylab("Count")+ggtitle("Causes of all fires (by count)")+theme_minimal()
+```
+## Define graphical functions
+```{r}
+kernel_density_map<-function(df,map,x,y,title){
   #load map data
-  us<-map_data("state")
+  #us<-map_data("state")
+  us<-map
   #create density map based on position on point
-  base_plot<-ggplot(causes, aes(x = LONGITUDE, y = LATITUDE))
+  base_plot<-ggplot(causes, aes(x = LONGITUDE, y = LATITUDE))+theme_void()#+theme_minimal()
+  
   #overlay the US map and add labels
   base_plot<-base_plot+geom_polygon(data=us,aes(x=long,y=lat,group=group))+
-  xlab('Longitude') + 
-  ylab('Latitude') 
+  xlab('Longitude') + ylab('Latitude') 
   #fine tune presentation of density plot
-  base_plot+stat_density2d(aes(fill = ..level..), alpha = .5,
-                 geom = "polygon", data = df) + 
+  base_plot<-base_plot+stat_density2d(aes(fill = ..level..), alpha = .5,
+                           geom = "polygon", data = df) + 
   scale_fill_viridis_c(alpha=0.3,begin=.55,option="plasma") +
-  theme(legend.position = 'none')+
-  xlim(-125,-65)+ylim(20,50)+ggtitle(title)
+  theme(legend.position = 'none')+xlim(-125,-65)+ylim(20,50)+ggtitle(title)
+  return(base_plot)
 }
-
+#remove dual grouping (i think in geom polygon)?
 scatter_map<-function(df,xx,yy,title){
   us<-map_data("state")
   #plot points that represent location of fire
-  base_plot<-ggplot(df,aes(xx,yy))+geom_point(size=.05,alpha=.1,color="darkred")+xlim(-125,-65)+ylim(20,50)+ggtitle(title)
+  base_plot<-ggplot(df,aes_string(x=xx,y=yy))+
+    geom_polygon(data=us,aes(x=long,y=lat,group=group),color='gray',fill=NA,alpha=.1)+
+    geom_point(size=.05,alpha=.05,color="darkred")+xlim(-125,-65)+ylim(20,50)+
+    ggtitle(title)+theme_minimal()+xlab("Longitude")+ylab("Latitude")
+  
   #overlay map
- base_plot+geom_polygon(data=us,aes(x=long,y=lat,group=group),color='black',fill=NA,alpha=.1)+xlim(-125,-65)+ylim(20,50)
+ base_plot+xlim(-125,-65)+ylim(20,50)
 }
 
 bar_map<-function(df,cat,title){
@@ -95,176 +115,343 @@ geom_bar(fill="brown4", color="darkred")+coord_flip()+ggtitle(title)
   
 }
 ```
-us<-map_data("state")
-#all causes
-ggplot(causes[1:1000,],aes(LONGITUDE,LATITUDE)) +
-  geom_polygon(data=us,aes(x=long,y=lat,group=group),color='gray',fill=NA,alpha=.1)+
-  geom_point(size=.05,alpha=.1) +
-  xlim(-125,-65)+ylim(20,50)+ggtitle("Scatterplot of all fires")
-
+Lets simplify the causes listed above into three more palatable categories. 
+Natural fires (N) are those caused by lightning. Unknown fires (UK) are the 
+miscellaneous fires or the missing/undefined fires. Man-made fires (M) are all 
+of the other fire categories in our dataset.
 ```{r}
-
-scatter_map(causes,causes$LONGITUDE,causes$LATITUDE,"Scatterplot of all fires")
+#sql query that separates our STAT_CAUSE_DESCR data into the three groups 
+# outlined above. This column is names CAUSE_GROUP and is what our df is grouped
+# on. We then sum the count of each of these categories with the
+# column count and the acres burned by each category with total_areas
+fires_by_cause<-dbGetQuery(fires, "
+           SELECT 
+           CASE 
+           WHEN STAT_CAUSE_DESCR == 'Lightning' THEN 'N'
+           WHEN TRIM(STAT_CAUSE_DESCR) == 'Miscellaneous' OR
+           STAT_CAUSE_DESCR == 'Missing/Undefined' THEN 'UK'
+           ELSE 'M'
+           END as 'CAUSE_GROUP',
+           count(*) as [count],
+           ROUND(SUM(FIRE_SIZE), 0) as total_area
+           FROM Fires
+           GROUP BY CAUSE_GROUP
+           ")
+#peek at results
+fires_by_cause
 ```
-#all causes
-us<-map_data("state")
-ggplot(causes, aes(x = LONGITUDE, y = LATITUDE)) +  geom_polygon(data=us,aes(x=long,y=lat,group=group))+
-  xlab('Longitude') + 
-  ylab('Latitude') + 
-  stat_density2d(aes(fill = ..level..), alpha = .5,
-                 geom = "polygon", data = causes[1:1000,]) + 
-  scale_fill_viridis_c(alpha=0.3,begin=.55,option="plasma") +
-  theme(legend.position = 'none')+
-  xlim(-125,-65)+ylim(20,50)+ggtitle("Density of all fires")
+Now with one SQL call the differences between these categories both in raw 
+counts and the area burned is clear. Lets represent these differences in a 
+count plot
 
 ```{r}
-kernel_density_map(causes,"LONGITUDE","LATITUDE","Density of all fires")
-
-```
-#m=man made, n=natural
-ggplot(comb_causes, aes(x= reorder(STAT_CAUSE_DESCR,STAT_CAUSE_DESCR,function(x)+length(x)))) +
-geom_bar(color="blue",fill=rgb(0.1,0.4,0.5,0.7))+coord_flip()+ggtitle("Count of man-made vs. natural fires")
-
-```{r}
-#get fire causes 
-comb_causes<-causes["STAT_CAUSE_DESCR"]
-#categorize them
-#man-made
-cause_man<-c("Campfire","Equipment Use","Arson","Children","Railroad","Smoking","Powerline","Structure","Fireworks","Debris Burning")
-#cause nature
-cause_nature<-c("Lightning")
-#cause unknown, remove
-cause_uk<- c("Missing/Undefined","Miscellaneous")
-#remove unknown
-comb_causes<-rapply(comb_causes,function(x) ifelse(x %in% cause_uk,NA,x), how = "replace")
-remove_missing(comb_causes)
-#separated by two causes 
-comb_causes<-rapply(comb_causes,function(x) ifelse(x %in% cause_man,"m","n"), how = "replace")
-
-bar_map(comb_causes,comb_causes$STAT_CAUSE_DESCR,"Count of man-made vs. natural fires")
+ggplot(fires_by_cause,aes(y=count,x=reorder(CAUSE_GROUP,count)))+
+  geom_bar(stat="identity",fill="brown4",color="darkred")+
+  theme_minimal()+scale_x_discrete(labels=c("Natural", "Unknown", 
+  "Man Made"))+labs(x="Cause Type",y="Counts",title=
+                      "Count of all fires by cause")
 ```
 
-
+Man made fires are by far the most common. Man-made fires are 3x more common 
+than natural fires and more than 2x as common as unknown fires. Now lets examine 
+the area burned by each category of fire.
 ```{r}
-causes["STAT_CAUSE_DESCR"]<-comb_causes
-c<-split(causes, causes$STAT_CAUSE_DESCR)
-man<-c[[1]]
-natural<-c[[2]]
-natural
-```
-us<-map_data("state")
-#all causes
-ggplot(natural[1:1000,],aes(LONGITUDE,LATITUDE)) +
-  geom_polygon(data=us,aes(x=long,y=lat,group=group),color='gray',fill=NA,alpha=.1)+
-  geom_point(size=.05,alpha=.1) +xlim(-125,-65)+ylim(20,50)+ggtitle("Scatterplot of natural fires")
-
-
-```{r}
-scatter_map(natural,natural$LONGITUDE,natural$LATITUDE,"Scatterplot of natural fires")
-```
-
-
-t1<-natural[1:90,]
-ggplot(natural, aes(x = LONGITUDE, y = LATITUDE)) +   geom_polygon(data=us,aes(x=long,y=lat,group=group))+
-  xlab('Longitude') + 
-  ylab('Latitude') + 
-  stat_density2d(aes(fill = ..level..), alpha = .5,
-                 geom = "polygon", data = t1) + 
-  scale_fill_viridis_c(alpha=0.3,begin=.55,option="plasma") + 
-  theme(legend.position = 'none')+ggtitle("Density of natural fires")+xlim(-130,-60)+ylim(20,50)
-
-
-```{r}
-kernel_density_map(natural,"LONGITUDE","LATITUDE","Density of natural fires")
+ggplot(fires_by_cause,aes(y=total_area,x=reorder(CAUSE_GROUP,total_area)))+
+  geom_bar(stat="identity",fill="brown4", color="darkred")+
+  theme_minimal()+scale_x_discrete(labels=
+  c("Unknown", "Man Made","Natural"))+labs(x="Cause of fire",y="Total area burned (acres)",title="Total area burned by all fires (separated by cause)")
 
 ```
-us<-map_data("state")
-#all causes
-ggplot(man[1:1000,],aes(LONGITUDE,LATITUDE)) +
-  geom_polygon(data=us,aes(x=long,y=lat,group=group),color='gray',fill="white",alpha=.1)+
-  geom_point(size=.05,alpha=.1) +
-  xlim(-125,-65)+ylim(20,50)+ggtitle("Scatterplot of man-made fires")
+Now we see that even though the natural fires have the lowest count they have
+caused the most damage in area burned. Perhaps this is because these natural 
+fires tend to be further from population centers so they take longer to be
+noticed?
+```{r}
+scatter_map(dbGetQuery(fires, "
+SELECT 
+LATITUDE,
+LONGITUDE
+FROM fires"),"LONGITUDE","LATITUDE","Scatterplot of all fires")
+```
+With so many fires in our dataset this essentially becomes a population density 
+map, with some areas being so dense the points completely overlap. Lets take the 
+kernel density of all of our fires to see if this better elucidates the trends.
+
+
+```{r}
+kernel_density_map_akhi<-function(df,map,xlim=FALSE){
+  base_plot<-ggplot(df, aes(x = LONGITUDE, y = LATITUDE))+theme_void()
+  #+theme(axis.title.x = element_text())
+  
+  base_plot<-base_plot+geom_polygon(data=map,aes(x=long,y=lat,group=group),inherit.aes = FALSE)+
+    xlab('Longitude') + ylab('Latitude') 
+  
+  base_plot<-base_plot+stat_density2d(aes(fill = ..level..), alpha = .5,geom = "polygon")+
+  scale_fill_viridis_c(alpha=0.3,begin=.55,option="plasma",guide="none")
+  
+  if(xlim!=FALSE){
+     base_plot+xlim(-161,-153)
+  }
+  return(base_plot)
+}
+```
+
+kernel_density_map(dbGetQuery(fires, "
+           SELECT 
+           FIRE_YEAR, LATITUDE, LONGITUDE, FIRE_SIZE
+           FROM fires
+           WHERE STATE in ('HI')
+           "),hawaii,"LONGITUDE","LATITUDE","")+xlim(-161,-153)
+
+```{r}
+#alaska map
+ak_poly<-ggplot(data=dbGetQuery(fires, "
+           SELECT 
+           LATITUDE, LONGITUDE
+           FROM fires
+           WHERE STATE in ('AK')
+           "),aes(y=LATITUDE, x=LONGITUDE))+
+  geom_sf(data=us_ak$geometry,inherit.aes = FALSE,color="black",fill="black")+
+  stat_density2d(aes(fill = ..level..), alpha = .5,geom = "polygon")+
+  scale_fill_viridis_c(alpha=0.3,begin=.55,option="plasma")+
+  xlim(-180,-130)+ylim(51,71)+theme_void()+theme(legend.position = 'none')
+
+
+#hawaii map
+hi<-ggplot(dbGetQuery(fires, "
+           SELECT 
+           FIRE_YEAR, LATITUDE, LONGITUDE, FIRE_SIZE
+           FROM fires
+           WHERE STATE in ('HI')
+           "),aes(y=LATITUDE,x=LONGITUDE))+geom_polygon(data=hawaii,
+          aes(x=long,y=lat,group=group),inherit.aes = FALSE)+
+  stat_density2d(aes(fill = ..level..), alpha = .5,geom = "polygon")+
+  scale_fill_viridis_c(alpha=0.3,begin=.55,option="plasma")+xlim(-161,-153)
+
+
+#lower 48 map
+l48<-kernel_density_map(causes,map_data("state"),"LONGITUDE","LATITUDE","")
+
+l48
+```
+
+
+```{r}
+states<-list(ak_poly,hi)
+figure <- ggarrange(plotlist=states,nrows=2)
+figure
+```
+
+
+```{r}
+comb_causes<-dbGetQuery(fires, "
+           SELECT 
+           CASE 
+           WHEN STAT_CAUSE_DESCR == 'Lightning' THEN 'N'
+           WHEN TRIM(STAT_CAUSE_DESCR) == 'Miscellaneous' OR
+           STAT_CAUSE_DESCR == 'Missing/Undefined' THEN 'UK'
+           ELSE 'M'
+           END as 'CAUSE_GROUP',
+           FIRE_SIZE,
+           LATITUDE,
+           LONGITUDE
+           FROM Fires
+           ")
+
+#unkown is at c[[3]] but wont examine those
+c<-split(comb_causes, comb_causes$CAUSE_GROUP)
+man<-drop_na(c[[1]])
+natural<-drop_na(c[[2]])
+head(man)
+```
+
+
 ```{r}
 
-#fix
-scatter_map(man,man$LONGITUDE,man$LATITUDE,"Scatterplot of natural fires")
+kernel_density_map(natural,map_data("state"),"LONGITUDE","LATITUDE","Kernel Density of natural fires")
 
 ```
 
-us<-map_data("state")
-ggplot(man, aes(x = LONGITUDE, y = LATITUDE)) +   geom_polygon(data=us,aes(x=long,y=lat,group=group))+
-  xlab('Longitude') + 
-  ylab('Latitude') + stat_density2d(aes(fill = ..level..), alpha = .5, geom = "polygon", data = man[1:1000,]) + 
-scale_fill_viridis_c(alpha=0.3,begin=.55,option="plasma") + 
-theme(legend.position = 'none')+ggtitle("Density of man-made fires")+xlim(-130,-60)+ylim(20,50)
 
 ```{r}
-kernel_density_map(man,"LONGITUDE","LATITUDE","Density of man-made fires")
+kernel_density_map(man,map_data("state"),"LONGITUDE","LATITUDE","Density of man-made fires")
 
+```
+```{r}
+state_causes<-dbGetQuery(fires, "
+           SELECT 
+           STATE AS state,
+           ROUND(SUM(FIRE_SIZE), 0) as total_area
+           FROM Fires
+           Where STATE not in ('PR','DC')
+           GROUP BY STATE
+           ")
+
+state_causes
 ```
 
 ```{r}
-
-state_burned<-aggregate(natural$FIRE_SIZE, by=list(Category=natural$STATE), FUN=sum)
-colnames(state_burned)<-c("state","burned")
-
-plot_usmap(data = state_burned,values="burned",color="white") + scale_fill_viridis_c(alpha=1,begin=.55,option="plasma", name = "Sum of ? Burned", label = scales::comma) + 
-labs(title = "All Fires Burned by State from 1995 to 2015") +
-theme(legend.position = "right")
-#basically correlated with size, make another dividing by the area of the region
+plot_usmap(data = state_causes,values="total_area",color="white") + 
+  scale_fill_viridis_c(alpha=1,begin=.55, end=0.9,option="plasma",
+                       name = "Sum of value Burned", label = scales::comma) + 
+  labs(title = "Sum of all Fires Burned by State from 1995 to 2015") +
+  theme(legend.position = "right")
 ```
 
 
 ```{r}
+#get area of states
 data("state")
-df<-data.frame(state=state.name,"area_km2"=state.area)
-#drop dc and pr which is not in the R default
-state_burned<-subset(state_burned, state!="DC" & state!="PR")
-#divide by area
-state_burned$burned_by_area<-state_burned$burned/state.area
-plot_usmap(data = state_burned,values="burned_by_area",color="white") + scale_fill_viridis_c(alpha=1,begin=.55,option="plasma", name = "Sum of ? Burned", label = scales::comma) + 
-labs(title = "All Fires Burned by State from 1995 to 2015 Controlled by Area") +theme(legend.position = "right")
-#seems to be centralized (excluding alaska)
+df<-data.frame("area_km2"=state.area)
+#see which state has had the most burn relative to their size
+state_causes$burned_by_area<-state_causes$total_area/df$area_km2
+plot_usmap(data = state_causes,values="burned_by_area",color="white")+
+  scale_fill_viridis_c(alpha=1,begin=.55, end=0.9,option="plasma",
+                       name = "Sum of ? Burned", label = scales::comma)+ 
+  labs(title = "Sum of all Fires Burned by State from 1995 to 2015 (Controlled by Area)")+
+  theme(legend.position = "right")
 ```
 
 
 ```{r}
-#drop dc and pr which is not in the R default
-state_burned<-subset(state_burned, state!="DC" & state!="PR")
-state_burned$logburned=log(state_burned$burned)
-#divide by area
-state_burned$log_burned_by_area<-state_burned$logburned/log(state.area)
-plot_usmap(data = state_burned,values="log_burned_by_area",color="white") + scale_fill_viridis_c(alpha=1,begin=.55,option="plasma", name = "Sum of ? Burned", label = scales::comma) + 
-labs(title = "All log Fires Burned by State from 1995 to 2015 Controlled by Area") +theme(legend.position = "right")
-#seems to be centralized (excluding alaska)
+#year_burned$logburned=log(year_burned$total_area)
+ggplot(data=year_burned<-dbGetQuery(fires, "
+           SELECT 
+           FIRE_YEAR as year,
+           ROUND(SUM(FIRE_SIZE), 0) as total_area
+           FROM Fires
+           GROUP BY FIRE_YEAR
+           "), aes(x=year, y=total_area, group=1)) +
+  geom_area(alpha=0.7,fill="firebrick4")+
+  geom_line(color="firebrick4")+
+  geom_point(alpha=0.7,colour="firebrick4")+
+  ylim(0,10250000)+theme_minimal()+xlab("Year")+ylab("Sum of Acres Burned")
 ```
 
 
 ```{r}
-d<-data.frame(state=state.name,"center"=state.center)
-colnames(d)<-c("state","x","y")
-state_burned$lat<-d$x
-state_burned$long<-d$y
-#make barplot ig since kernel density is so bad lol
-#sort in order by size
-ggplot(data=state_burned, aes(x=state, y=logburned)) +
-  geom_bar(fill="firebrick4",stat='identity')+coord_flip()
+statey_causes<-dbGetQuery(fires, "
+           SELECT 
+           STATE AS state,
+           FIRE_YEAR AS year,
+           ROUND(SUM(FIRE_SIZE), 0) as total_area
+           FROM Fires
+           GROUP BY STATE, FIRE_YEAR
+           ")
+statey_causes
 ```
-
-
+# Stream graph with a legend
+statey_causes %>%
+streamgraph(state, total_area, year, width = NULL, height = NULL,
+  offset = "silhouette", interpolate = "cardinal", interactive = TRUE,
+  scale = "date", top = 20, right = 40, bottom = 30, left = 50)
 
 ```{r}
-years<-data.frame(fire_info %>%
-    select(FIRE_YEAR,FIRE_SIZE,LATITUDE, LONGITUDE))
+year_2015<-dbGetQuery(fires, "
+           SELECT 
+           FIRE_YEAR, LATITUDE, LONGITUDE, FIRE_SIZE
+           FROM fires
+           WHERE FIRE_YEAR in (2015) AND STATE in ('CA')
+           ")
 
-year_burned<-aggregate(years$FIRE_SIZE, by=list(Category=years$FIRE_YEAR), FUN=sum)
-colnames(year_burned)<-c("year","burned")#,"lat","long")
-year_burned
+year_2015
 ```
 ```{r}
-year_burned$logburned=log(year_burned$burned)
-#reg1 <- lm(burned~year,data=year_burned) 
-ggplot(data=year_burned, aes(x=year, y=burned, group=1)) +
-  geom_line(alpha=0.7,linetype=4,colour="firebrick4")+
-  geom_point(alpha=0.7,colour="firebrick4")+ylim(0,10250000)
+us<-map_data("state")
+NewStates <- filter(us,region ==  "california"|region=="nevada"|region=="arizona"|region=="oregon")
+#fill is wrong T-T
+#plot points that represent location of fire
+bp<-ggplot(year_2015,aes(y=LATITUDE,x=LONGITUDE,fill=Fire_SIZE))+geom_polygon(data=NewStates,aes(x=long,y=lat,group=group),inherit.aes = FALSE)+
+  stat_density2d(aes(fill = ..level..), alpha = .5,geom = "polygon")+
+  scale_fill_viridis_c(alpha=0.3,begin=.55,option="plasma")
+bp
 ```
+
+
+us<-map_data("world2")
+usa <- getData("GADM", country = "usa", level = 1)
+alaska <- subset(usa, NAME_1 == "Alaska")
+
+
+ak<-ggplot(dbGetQuery(fires, "
+           SELECT 
+           FIRE_YEAR, LATITUDE, LONGITUDE, FIRE_SIZE
+           FROM fires
+           WHERE STATE in ('AK')
+           ")[1:10,],aes(y=LATITUDE,x=LONGITUDE))+geom_polygon(data=alaska,aes(x=long,y=lat,group=group),inherit.aes = FALSE)+stat_density2d(aes(fill = ..level..), alpha = .5,geom = "polygon")+
+  scale_fill_viridis_c(alpha=0.3,begin=.55,option="plasma")+xlim(-180,-120)
+
+
+hi<-ggplot(dbGetQuery(fires, "
+           SELECT 
+           FIRE_YEAR, LATITUDE, LONGITUDE, FIRE_SIZE
+           FROM fires
+           WHERE STATE in ('HI')
+           "),aes(y=LATITUDE,x=LONGITUDE))+geom_polygon(data=hawaii,aes(x=long,y=lat,group=group),inherit.aes = FALSE)+stat_density2d(aes(fill = ..level..), alpha = .5,geom = "polygon")+
+  scale_fill_viridis_c(alpha=0.3,begin=.55,option="plasma")+xlim(-161,-153)
+
+
+
+l48<-kernel_density_map(causes[1:100,],map_data("state"),"LONGITUDE","LATITUDE","Kernel Density of all fires")
+
+
+
+figure <- ggarrange(ggarrange(ak,NULL, hi,ncol=3,widths = c(.5, -0.25, 1)), l48,
+                   nrow=2,heights=c(1.5,4))
+figure
+
+#alaska map
+usa<-map_data("state")
+NewStates <- filter(usa,region ==  "california"|region=="nevada"|region=="arizona"|region=="oregon")
+
+alaska <- ggplot(data=us)+geom_sf(fill = "cornsilk")+coord_sf(crs =3467, xlim = c(-2400000, 1600000), ylim = c(200000, 2500000), expand = FALSE, datum = NA)
+
+hi<-kernel_density_map_akhi(dbGetQuery(fires, "
+           SELECT 
+           FIRE_YEAR, LATITUDE, LONGITUDE, FIRE_SIZE
+           FROM fires
+           WHERE STATE in ('HI')
+           "),hawaii,xlim=TRUE)
+
+ak<-kernel_density_map_akhi(-dbGetQuery(fires, "
+           SELECT 
+           LATITUDE, LONGITUDE, FIRE_SIZE
+           FROM fires
+           WHERE FIRE_YEAR in (2013) AND STATE in ('OH')
+           "),usa,xlim=FALSE)
+
+
+#layout(matrix(c(1,1,2,3), 2, 2, byrow = TRUE))
+#lower 48 map
+l48<-kernel_density_map(causes[1:100,],map_data("state"),"LONGITUDE","LATITUDE","Kernel Density of all fires")
+#hawaii map
+
+
+ak<-ggplot(dbGetQuery(fires, "
+           SELECT 
+           FIRE_YEAR, LATITUDE, LONGITUDE, FIRE_SIZE
+           FROM fires
+           WHERE FIRE_YEAR in (2015) AND STATE in ('AK')
+           "),aes(y=LATITUDE,x=LONGITUDE,fill=Fire_SIZE))+
+  geom_polygon(data= alaska,aes(x=long,y=lat,group=group),inherit.aes = FALSE)+
+  stat_density2d(aes(fill = ..level..), alpha = .5,geom = "polygon")+
+  scale_fill_viridis_c(alpha=0.3,begin=.55,option="plasma",guide="none")+
+  theme_minimal()
+  
+  hi<-ggplot(dbGetQuery(fires, "
+           SELECT 
+           FIRE_YEAR, LATITUDE, LONGITUDE, FIRE_SIZE
+           FROM fires
+           WHERE STATE in ('HI')
+           "),
+  aes(y=LATITUDE,x=LONGITUDE))+
+  geom_polygon(data=hawaii,aes(x=long,y=lat,group=group),inherit.aes = FALSE)+
+  stat_density2d(aes(fill = ..level..), alpha = .5,geom = "polygon")+
+  scale_fill_viridis_c(alpha=0.3,begin=.55,option="plasma",guide="none")+
+  xlim(-161,-153)+theme_minimal()
+
+plot(alaska)
+
+figure <- ggarrange(ggarrange(ak,NULL, hi,ncol=3,widths = c(.5, -0.25, 1)), l48,
+                   nrow=2,heights=c(1.5,4))
+figure
