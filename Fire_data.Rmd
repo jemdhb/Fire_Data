@@ -1,10 +1,10 @@
 ---
 title: "Fire Data"
 output:
-  pdf_document: default
-  html_notebook: default
   html_document:
     df_print: paged
+  html_notebook: default
+  pdf_document: default
 ---
 
 Load Packages 
@@ -206,13 +206,14 @@ scatter_map(dbGetQuery(fires, "
 SELECT 
 LATITUDE,
 LONGITUDE
-FROM fires"),"LONGITUDE","LATITUDE","Scatterplot of all fires")
+FROM fires")[1:900000,],"LONGITUDE","LATITUDE","Scatterplot of all fires")
 ```
 
-With so many fires in our dataset this map is essentially worthless. So many 
-points are overlapping the trends of the data are largely inscrutable. A more 
-valuable metric would be the kernel density map of all of our fires.
-Lets see if this better elucidates the undelying trends in the data.
+Even subsetting this map to contain a 30th of our total dataset there are still 
+too many fires for this representation to be usable. So many points are 
+overlapping the trends of the data are largely inscrutable. A more valuable
+metric would be the kernel density map of all of our fires.Lets see if this 
+better elucidates the undelying trends in the data.
 
 Due to inconsistencies with the map of Alaska in the mapping package I have been 
 utilizing for the lower 48 states and Hawaii, I have chosen to use a map from a
