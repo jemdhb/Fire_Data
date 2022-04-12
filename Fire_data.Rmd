@@ -1,35 +1,37 @@
 ---
 title: "Fire Data"
 output:
+  pdf_document: default
+  html_notebook: default
   html_document:
     df_print: paged
-  html_notebook: default
-  pdf_document: default
 ---
 
-## Load Packages 
-```{r}
-library("RSQLite")
-library("tidyr")
-library("rspatial")
-library("dbplyr")
-library("dplyr")
+Load Packages 
 library("rworldmap")
 library("readxl")
 library("purrr")
-library("ggplot2")
 library("maps")
-library("mapdata")
-library("usmap")
+library("mapdata") 
 require("devtools")
 library("ggpubr")
-library("rnaturalearth")
-library("rnaturalearthdata")
-#library("rgdal")
-
+```{r}
+suppressPackageStartupMessages({
+library("RSQLite")#to help us subset our SQL dataset 
+library("tidyr")#used to drop NA values
+library("rspatial") #used for map of hawaii
+library("dbplyr") #used in SQL databse connection set-up 
+library("dplyr") #used in SQL databse connection set-up 
+library("ggplot2") #used for visualization 
+library("usmap")#used for state-by-state comparisons
+library("rnaturalearth")#used for map of alaska
+library("rnaturalearthdata")#used for map of alaska
+library(patchwork) #to display multiple kernel density maps
+library("rgdal")
+})
 ```
-## Acess US Fire data with SQL
-data source: 
+
+Data Source: 
 ```{r}
 #maps we will use in our analysis
 #hawaii map
@@ -41,58 +43,49 @@ us_ak<- subset(ne_countries(scale='medium',returnclass = 'sf'), admin == "United
 
 ```
 
-
+### Acess Fire data with SQL
 ```{r}
 fires <- DBI::dbConnect(RSQLite::SQLite(), "FPA_FOD_20170508.sqlite")
 src_dbi(fires)
 ```
 
-
+get column names for our dataset
 ```{r}
 dbListFields(fires, "fires")
-#DISCOVERY_DATE -CONT_DATE see average fire length 
-#Fire_size is in acres
-#FIPS_CODE do county density ?
 
 ```
 
-## Pare down fire data to what will be used in our analysis
+Pare down fire data to what will be used in our analysis
 ```{r}
 fire_info<-tbl(fires, sql("SELECT OBJECTID, SOURCE_SYSTEM, SOURCE_REPORTING_UNIT_NAME, FIRE_NAME, FIRE_YEAR,DISCOVERY_DATE, STAT_CAUSE_DESCR, CONT_DATE,FIRE_SIZE, FIRE_SIZE_CLASS,LATITUDE, LONGITUDE,STATE,COUNTY, FIPS_CODE, FIPS_NAME, COUNTY, FIPS_NAME FROM fires"))
 #head(fire_info, n = 10)
 causes<-data.frame(fire_info %>%
-    select(STAT_CAUSE_DESCR,LATITUDE,LONGITUDE,STATE,FIRE_SIZE,FIRE_SIZE_CLASS))
+    dplyr::select(STAT_CAUSE_DESCR,LATITUDE,LONGITUDE,STATE,FIRE_SIZE,FIRE_SIZE_CLASS))
 head(causes)
 
 fire_info=NA
 ```
-Lets examine the most common causes for fires
+
+### Define graphical functions for presentation
 ```{r}
-# Show the causes of fire with counts in descending order
-ggplot(dbGetQuery(fires, "
-           SELECT 
-           STAT_CAUSE_DESCR, 
-           count(*) as [count] 
-           FROM Fires 
-           GROUP BY STAT_CAUSE_DESCR 
-           ORDER BY count DESC;"),aes(y=count,x=reorder(STAT_CAUSE_DESCR,count)))+geom_bar(stat="identity",fill="brown4", color="darkred")+coord_flip()+xlab("Cause of fire")+ylab("Count")+ggtitle("Causes of all fires (by count)")+theme_minimal()
-```
-## Define graphical functions
-```{r}
-kernel_density_map<-function(df,map,title,xlim=FALSE){
-  #load map data
-  #us<-map_data("state")
+#function kernel_density_map creates: A 2d density map based on inputted latitude and longitude coordinates. This map is then overlayed onto a passed in map 
+#df: data frame containing the latitude and longitude coordinates for each fire
+#map: map we will overlay our kernel density on 
+#title: figure title
+#hawaii: Boolean that sets limits on the dimensions of the kernel density map. When hawaii=true sets the latitude and longitude limits to be those of Hawaii. Otherwise,the lower 48 states are used as the latitude and longitude limits.
+kernel_density_map<-function(df,map,title,hawaii=FALSE){
   us<-map
-  if(xlim==TRUE){
-     base_plot<-ggplot(causes, aes(x = LONGITUDE, y = LATITUDE))+theme_void()+xlim(-178,-154)
+  #sets map dimensions to HI
+  if(hawaii==TRUE){
+     base_plot<-ggplot(causes, aes(x = LONGITUDE, y = LATITUDE))+theme_void()+xlim(-162,-150)+ylim(15,23)
   }
+  #sets dimensions to the lower 48
   else{
-   base_plot<-ggplot(causes, aes(x = LONGITUDE, y = LATITUDE))+theme_void()+xlim(-125,-65)+ylim(20,50)
+   base_plot<-ggplot(causes, aes(x = LONGITUDE, y = LATITUDE))+theme_void()+xlim(-125,-67)+ylim(25,50)
   }
-  #create density map based on position on point
+
   
-  
-  #overlay the US map and add labels
+  #overlay the inputted map and add labels
   base_plot<-base_plot+geom_polygon(data=us,aes(x=long,y=lat,group=group))+
   xlab('Longitude') + ylab('Latitude') 
   #fine tune presentation of density plot
@@ -115,13 +108,43 @@ scatter_map<-function(df,xx,yy,title){
   #overlay map
  base_plot+xlim(-125,-65)+ylim(20,50)
 }
-
+#function bar_map creates a vertically aligned countplot from the passed in dataframe at column cat, setting the title with title
+#df: data frame containing the passed in column cat
+#cat: column we will pull our information from 
+#title: figure title
 bar_map<-function(df,cat,title){
 ggplot(df, aes(x= reorder(cat,cat,function(x)+length(x)))) +
 geom_bar(fill="brown4", color="darkred")+coord_flip()+ggtitle(title)
   
 }
+
+arrange_states<-function(AK, HI, l48){
+#place alaska above hawaii in one pane
+lb<-(AK+HI)+plot_layout(nrow=2)
+
+#used to control figure sizing A=lower 48, B= alaska and hawaii figure
+layout<- "
+AAB
+"
+#put the lower 48 states on the left and the lb pane on the right
+fig<-(l48/lb)+plot_layout(design = layout)
+return(fig)
+}
 ```
+
+## Examination of Fire Causes
+Lets examine the most common causes for fires
+```{r}
+# Show the causes of fire with counts in descending order
+ggplot(dbGetQuery(fires, "
+           SELECT 
+           STAT_CAUSE_DESCR, 
+           count(*) as [count] 
+           FROM Fires 
+           GROUP BY STAT_CAUSE_DESCR 
+           ORDER BY count DESC;"),aes(y=count,x=reorder(STAT_CAUSE_DESCR,count)))+geom_bar(stat="identity",fill="brown4", color="darkred")+coord_flip()+xlab("Cause of fire")+ylab("Count")+ggtitle("Causes of all fires (by count)")+theme_minimal()
+```
+
 Lets simplify the causes listed above into three more palatable categories. 
 Natural fires (N) are those caused by lightning. Unknown fires (UK) are the 
 miscellaneous fires or the missing/undefined fires. Man-made fires (M) are all 
@@ -160,8 +183,9 @@ ggplot(fires_by_cause,aes(y=count,x=reorder(CAUSE_GROUP,count)))+
 ```
 
 Man made fires are by far the most common. Man-made fires are 3x more common 
-than natural fires and more than 2x as common as unknown fires. Now lets examine 
-the area burned by each category of fire.
+than natural fires and 2x more common as unknown fires. But not every fires is
+the same in severity or magnitude. Now lets examine the area burned by each 
+category of fire.
 ```{r}
 ggplot(fires_by_cause,aes(y=total_area,x=reorder(CAUSE_GROUP,total_area)))+
   geom_bar(stat="identity",fill="brown4", color="darkred")+
@@ -169,10 +193,14 @@ ggplot(fires_by_cause,aes(y=total_area,x=reorder(CAUSE_GROUP,total_area)))+
   c("Unknown", "Man Made","Natural"))+labs(x="Cause of fire",y="Total area burned (acres)",title="Total area burned by all fires (separated by cause)")
 
 ```
-Now we see that even though the natural fires have the lowest count they have
-caused the most damage in area burned. Perhaps this is because these natural 
-fires tend to be further from population centers so they take longer to be
-noticed?
+
+Even though the natural fires have the lowest count they have burned the most 
+acreage. Perhaps this is because these natural fires tend to be further from 
+population centers so they take longer to be noticed?
+
+### Map based analysis
+Now we will examine every fire occurrence on the map of the United States to 
+see if any trends are visible.
 ```{r}
 scatter_map(dbGetQuery(fires, "
 SELECT 
@@ -180,29 +208,11 @@ LATITUDE,
 LONGITUDE
 FROM fires"),"LONGITUDE","LATITUDE","Scatterplot of all fires")
 ```
-With so many fires in our dataset this essentially becomes a population density 
-map, with some areas being so dense most of the points completely overlap. 
-Lets take the kernel density of all of our fires to see if this better 
-elucidates the trends.
 
-
-```{r}
-kernel_density_map_akhi<-function(df,map,xlim=FALSE){
-  base_plot<-ggplot(df, aes(x = LONGITUDE, y = LATITUDE))+theme_void()
-  #+theme(axis.title.x = element_text())
-  
-  base_plot<-base_plot+geom_polygon(data=map,aes(x=long,y=lat,group=group),inherit.aes = FALSE)+
-    xlab('Longitude') + ylab('Latitude') 
-  
-  base_plot<-base_plot+stat_density2d(aes(fill = ..level..), alpha = .5,geom = "polygon")+
-  scale_fill_viridis_c(alpha=0.3,begin=.55,option="plasma",guide="none")
-  
-  if(xlim!=FALSE){
-     base_plot+xlim(-178,-154)
-  }
-  return(base_plot)
-}
-```
+With so many fires in our dataset this map is essentially worthless. So many 
+points are overlapping the trends of the data are largely inscrutable. A more 
+valuable metric would be the kernel density map of all of our fires.
+Lets see if this better elucidates the undelying trends in the data.
 
 Due to inconsistencies with the map of Alaska in the mapping package I have been 
 utilizing for the lower 48 states and Hawaii, I have chosen to use a map from a
@@ -223,7 +233,7 @@ ak_poly<-ggplot(data=dbGetQuery(fires, "
   xlim(-180,-130)+ylim(51,71)+theme_void()+theme(legend.position = 'none')
 ```
 
-Lets calculate our kernel density for hawaii and the lower 48 states, which are 
+Lets calculate our kernel density for Hawaii and the lower 48 states, which are 
 located in different maps.
 ```{r}
 hi<-kernel_density_map(dbGetQuery(fires, "
@@ -231,28 +241,31 @@ hi<-kernel_density_map(dbGetQuery(fires, "
            FIRE_YEAR, LATITUDE, LONGITUDE, FIRE_SIZE
            FROM fires
            WHERE STATE in ('HI')
-           "),hawaii, "", TRUE)
+           "),hawaii, "",TRUE)
 
-```
-
-
-```{r}
 #lower 48 map
 l48<-kernel_density_map(causes,map_data("state"),"Kernel Density of all Fires",FALSE)
 ```
 
-Now we will display all three of our maps with the patchwork library
+Now we will display all three of our maps with the patchwork library.
 ```{r}
-library(patchwork)
-layout <- "
-AAAAAAAAAAAAAAAAAAAA#BBBBBBBBC
+#place alaska above hawaii in one pane
+lb<-(ak_poly+hi)+plot_layout(nrow=2)
+
+#used to control figure sizing A=lower 48, B= alaska and hawaii figure
+layout<- "
+AAB
 "
-(l48 | ak_poly / hi)+
-  plot_layout(design = layout)
+#put the lower 48 states on the left and the lb pane on the right
+(l48/lb)+plot_layout(design = layout)
 ```
 
-Now lets see if fires follow different trends based on their cause when looking 
-at them on the map of the United States.
+Fires appear to be densest in the south, with smaller clusters around California 
+and New York. 
+In Alaska the fires are centered around Alaska's two largest urban centers: 
+Anchorage and Fairbanks
+In Hawaii the fires are centered on Oahu.
+Now lets see if fires follow different trends causally.
 ```{r}
 comb_causes<-dbGetQuery(fires, "
            SELECT 
@@ -274,6 +287,7 @@ c<-split(comb_causes, comb_causes$CAUSE_GROUP)
 man<-drop_na(c[[1]])
 natural<-drop_na(c[[2]])
 ```
+
 Now that we have separated out fires by cause, lets see what these density maps 
 elucidate. We will first examine the fires with natural causes (i.e. lightning 
 strikes that led to a subsequent fire).
@@ -281,9 +295,7 @@ strikes that led to a subsequent fire).
 ```{r}
 #nothing changes about our lower 48 call, except the dataframe we are passing in
 natural_48<-kernel_density_map(natural,map_data("state"), "Kernel Density of natural fires")
-
 ```
-
 
 ```{r}
 #for Hawaii and Alaska we will pull from this dataframe instead of making a SQL
@@ -295,16 +307,27 @@ ak_poly_natural<-ggplot(AK_natural,aes(y=LATITUDE, x=LONGITUDE))+
   geom_sf(data=us_ak$geometry,inherit.aes = FALSE,color="black",fill="black")+
   stat_density2d(aes(fill = ..level..), alpha = .5,geom = "polygon")+
   scale_fill_viridis_c(alpha=0.3,begin=.55,option="plasma")+
-  xlim(-170,-130)+ylim(51,71)+theme_void()+theme(legend.position = 'none')
+  xlim(-180,-130)+ylim(51,71)+theme_void()+theme(legend.position = 'none')
 
 hi_poly_natural<-kernel_density_map(HI_natural,hawaii, "",TRUE)
 ```
 
 
 ```{r}
-(natural_48 | ak_poly_natural / hi_poly_natural)+
-  plot_layout(design = layout)
+lb<-(ak_poly_natural+hi_poly_natural)+plot_layout(nrow=2)
+layout<- "
+AAB
+"
+(natural_48/lb)+plot_layout(design = layout)
 ```
+
+When looking at natural fires, their density is dramatically shifted west. 
+Only the natural fires in Florida are notable in the south.
+In Alaska, the density of the fires have shifted from Alaska's urban centers 
+(Anchorage and Fairbanks) to  the center of the middle of the state, including 
+Fairbanks.
+In Hawaii the fires are centered on the big island around two national parks
+encompassing the bottom of the big island.
 
 Now we will examine the density maps of fires caused by humans.
 ```{r}
@@ -314,7 +337,7 @@ man_48<-kernel_density_map(man,map_data("state"),"Density of man-made fires")
 
 
 ```{r}
-#hawaii and alaska maps
+#Hawaii and Alaska maps
 HI_man<-man[man$STATE=="HI",]
 AK_man<-man[man$STATE=="AK",]
 
@@ -322,17 +345,26 @@ ak_poly_man<-ggplot(AK_man,aes(y=LATITUDE, x=LONGITUDE))+
   geom_sf(data=us_ak$geometry,inherit.aes = FALSE,color="black",fill="black")+
   stat_density2d(aes(fill = ..level..), alpha = .5,geom = "polygon")+
   scale_fill_viridis_c(alpha=0.3,begin=.55,option="plasma")+
-  xlim(-170,-130)+ylim(51,71)+theme_void()+theme(legend.position = 'none')
+  xlim(-180,-130)+ylim(51,71)+theme_void()+theme(legend.position = 'none')
 
 hi_poly_man<-kernel_density_map(HI_man,hawaii, "",TRUE)
 ```
 
 
 ```{r}
-#display with same layout as before 
-(man_48 | ak_poly_man / hi_poly_man)+
-  plot_layout(design = layout)
+lb<-(ak_poly_man+hi_poly_man)+plot_layout(nrow=2)
+layout<- "
+AAB
+"
+(man_48/lb)+plot_layout(design = layout)
 ```
+
+For the lower 48 states and Alaska this map of man-made fires closely matches 
+that of the map of all fires. Hawaii's map hardly shifts, considering the big 
+island is also the largest urban center in the state.
+
+The above density maps count each fire equally, no matter the size. To get rid 
+of this bias, lets examine the acres burned by state.
 ```{r}
 state_causes<-dbGetQuery(fires, "
            SELECT 
@@ -345,14 +377,16 @@ state_causes<-dbGetQuery(fires, "
 
 state_causes
 ```
-
+ 
+### Examination of fires by state
 ```{r}
 plot_usmap(data = state_causes,values="total_area",color="white") + 
   scale_fill_viridis_c(alpha=1,begin=.55, end=0.9,option="plasma",
-                       name = "Sum of value Burned", label = scales::comma) + 
+                       name = "Sum of Acres Burned", label = scales::comma) + 
   labs(title = "Sum of all Acres Burned by State from 1995 to 2015") +
   theme(legend.position = "right")
 ```
+
 At this scale acres burned is clearly connected to the size of the state with 
 larger states having more total acres burned by fires. This makes sense because 
 they have a larger burn potential then the smaller states.Lets see if this trend 
@@ -371,14 +405,16 @@ plot_usmap(data = state_causes,values="burned_by_area",color="white")+
   labs(title = "Sum of all Acres Burned by State from 1995 to 2015 (Controlled by Area)")+
   theme(legend.position = "right")
 ```
+
 When accounting for the size of the state, most of the states perform the same.
 The most obvious outlier is Alaska which lacks the population and in turn the 
 resources (or need) to put out as many fires. Other larger states with 
 lower population such as Idaho, Nevada, New Mexico and Nebraska follow this 
 trend to a lesser degree.
+
+### Examanation of fires by year
 ```{r}
-#year_burned$logburned=log(year_burned$total_area)
-ggplot(data=year_burned<-dbGetQuery(fires, "
+ggplot(data=dbGetQuery(fires, "
            SELECT 
            FIRE_YEAR as year,
            ROUND(SUM(FIRE_SIZE), 0) as total_area
@@ -391,25 +427,87 @@ ggplot(data=year_burned<-dbGetQuery(fires, "
   ylim(0,10250000)+theme_minimal()+xlab("Year")+ylab("Sum of Acres Burned")
 
 ```
+
+Examining this plot, we can see the smallest fire year was in 1998 and the 
+largest fire year was in 2015. 8,207,166, or 5x more acres burned in 2015 than 
+1998. Is there a functional reason for this difference (e.g., more man-made 
+fires, more fires in an ill-equipped area) or did these two years follow the 
+classical trends just on differing scales?
+
 Start of unfinished work:
-Maybe add data about best and worst years? 
+First we will query our dataset for fires from 2015 and 1998
 ```{r}
 year_2015<-dbGetQuery(fires, "
            SELECT 
-           FIRE_YEAR, LATITUDE, LONGITUDE, FIRE_SIZE
+           LATITUDE, LONGITUDE, FIRE_SIZE
            FROM fires
-           WHERE FIRE_YEAR in (2015) AND STATE in ('CA')
+           WHERE FIRE_YEAR in (2015)
            ")
 
-year_2015
+year_1998<-dbGetQuery(fires, "
+           SELECT 
+           LATITUDE, LONGITUDE, FIRE_SIZE
+           FROM fires
+           WHERE FIRE_YEAR in (1998)
+           ")
 ```
+
+First we will calculate the 1998 data
 ```{r}
-us<-map_data("state")
-NewStates <- filter(us,region ==  "california"|region=="nevada"|region=="arizona"|region=="oregon")
-#fill is wrong T-T
-#plot points that represent location of fire
-bp<-ggplot(year_2015,aes(y=LATITUDE,x=LONGITUDE,fill=Fire_SIZE))+geom_polygon(data=NewStates,aes(x=long,y=lat,group=group),inherit.aes = FALSE)+
+#hawaii
+hi_98<-kernel_density_map(year_1998,hawaii, "",TRUE)
+#alaska
+ak_98<-ggplot(year_1998,aes(y=LATITUDE, x=LONGITUDE))+
+  geom_sf(data=us_ak$geometry,inherit.aes = FALSE,color="black",fill="black")+
   stat_density2d(aes(fill = ..level..), alpha = .5,geom = "polygon")+
-  scale_fill_viridis_c(alpha=0.3,begin=.55,option="plasma")
-bp
+  scale_fill_viridis_c(alpha=0.3,begin=.55,option="plasma")+
+  xlim(-180,-130)+ylim(51,71)+theme_void()+theme(legend.position = 'none')
+#lower 48
+l48_98<-kernel_density_map(year_1998,map_data("state"),"Density of fires in 1998")
+
+panel_1998<-arrange_states(ak_98,hi_98,l48_98)
+```
+
+Then the 2015 data 
+```{r}
+#hawaii
+hi_15<-kernel_density_map(year_2015,hawaii, "",TRUE)
+#alaska
+ak_15<-ggplot(year_2015,aes(y=LATITUDE, x=LONGITUDE))+
+  geom_sf(data=us_ak$geometry,inherit.aes = FALSE,color="black",fill="black")+
+  stat_density2d(aes(fill = ..level..), alpha = .5,geom = "polygon")+
+  scale_fill_viridis_c(alpha=0.3,begin=.55,option="plasma")+
+  xlim(-180,-130)+ylim(51,71)+theme_void()+theme(legend.position = 'none')
+#lower 48
+l48_15<-kernel_density_map(year_2015,map_data("state"),"Density of fires in 2015")
+#arrange
+panel_2015<-arrange_states(ak_15,hi_15,l48_15)
+```
+
+Now we will present the graphs on top of one another to allow for direct 
+comparison
+```{r}
+(panel_1998|panel_2015)+plot_layout(nrow=2)
+```
+
+**Lower 48 states:**
+
+1998: The lower 48 states have their densest area in the south and largely match the shape of the map of all years of fires.
+
+2015: The fires have more density centers and cover a larger portion of the map, especially in the Midwest and New England. 
+
+**Alaska:**
+
+1998: The fires are centered around the urban centers of Alaska, just as they are in the map of all fire years.
+
+
+2015: The fires are just as heavily centered in the urban centers, but have also spread to much of the area surrounding them in the middle of the state.
+
+**Hawaii:**
+
+1998: The fires seem to encompass the entire state. This either could be due to an unseemly amount of fires in Hawaii that year, or that there was not enough data for the density map to find its center. Either way Hawaii is too small to significantly effect the fire trends of the whole country.
+
+2015: The fires are centered on the same island as the map with all of the fire years, with additional fires on the big island.
+```{r}
+
 ```
