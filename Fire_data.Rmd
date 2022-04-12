@@ -375,7 +375,7 @@ state_causes<-dbGetQuery(fires, "
            GROUP BY STATE
            ")
 
-state_causes
+head(state_causes)
 ```
  
 ### Examination of fires by state
